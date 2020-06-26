@@ -6,7 +6,7 @@ import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel
 import torch.optim as optim
 import torch.multiprocessing as mp
-import detectron2.utils.comm as comm
+import comm
 
 
 parser = argparse.ArgumentParser(description='Distributed Data Parallel')
@@ -23,8 +23,9 @@ class ToyModel(nn.Module):
 
     def forward(self, x):
         x1 = self.relu(self.net1(x))  # [20, 10]
-        x1_list = [torch.empty_like(x1, device='cuda') for _ in range(dist.get_world_size())]
-        dist.all_gather(x1_list, x1)
+        # x1_list = [torch.empty_like(x1, device='cuda') for _ in range(dist.get_world_size())]
+        # dist.all_gather(x1_list, x1)
+        x1_list = comm.all_gather(x1)
         y = torch.cat(x1_list, dim=0).mean(0, keepdim=True).expand(5, -1)  # [5, 10]
         weight = 0.9 * self.net2.weight + 0.1 * y
         out = x1.mm(weight.t())
