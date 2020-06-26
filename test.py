@@ -19,10 +19,16 @@ class ToyModel(nn.Module):
         super(ToyModel, self).__init__()
         self.net1 = nn.Linear(10, 10)
         self.relu = nn.ReLU()
-        self.net2 = nn.Linear(10, 5)
+        self.net2 = nn.Linear(10, 5, bias=False)
 
     def forward(self, x):
-        return self.net2(self.relu(self.net1(x)))
+        x1 = self.relu(self.net1(x))  # [20, 10]
+        x1_list = [torch.empty_like(x1, device='cuda') for _ in range(dist.get_world_size())]
+        dist.all_gather(x1_list, x1)
+        y = torch.cat(x1_list, dim=0).mean(0, keepdim=True).expand(5, -1)  # [5, 10]
+        weight = 0.9 * self.net2.weight + 0.1 * y
+        out = x1.mm(weight.t())
+        return out
 
 
 def demo_basic(rank, world_size):
@@ -30,7 +36,7 @@ def demo_basic(rank, world_size):
     setup(rank, world_size)
 
     # create model and move it to GPU with id rank
-    model = ToyModel().to(rank)
+    model = ToyModel().to('cuda')
     ddp_model = DistributedDataParallel(model, device_ids=[dist.get_rank()], broadcast_buffers=False)
     ddp_model.train()
 
@@ -38,9 +44,9 @@ def demo_basic(rank, world_size):
     optimizer = optim.SGD(ddp_model.parameters(), lr=0.001)
 
     optimizer.zero_grad()
-    inputs = torch.randn((20, 10), device=rank)
+    inputs = torch.randn((20, 10), device='cuda')
     outputs = ddp_model(inputs)
-    labels = torch.randn(20, 5).to(rank)
+    labels = torch.randn(20, 5).to('cuda')
     loss_fn(outputs, labels).backward()
     optimizer.step()
 
@@ -60,6 +66,7 @@ def setup(rank, world_size):
 
     # initialize the process group
     dist.init_process_group("NCCL", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
 
 
 def cleanup():
