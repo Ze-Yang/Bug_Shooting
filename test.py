@@ -3,6 +3,7 @@ import argparse
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 import torch.optim as optim
 import torch.multiprocessing as mp
@@ -17,18 +18,25 @@ parser.add_argument('--world-size', type=int, default=2,
 class ToyModel(nn.Module):
     def __init__(self):
         super(ToyModel, self).__init__()
-        self.net1 = nn.Linear(10, 10)
-        self.relu = nn.ReLU()
-        self.net2 = nn.Linear(10, 5, bias=False)
+        self.stem = nn.Linear(10, 10)
+        self.branch1 = nn.Sequential(
+            nn.Linear(10, 10),
+            nn.ReLU(),
+            nn.Linear(10, 10))
+        self.branch2 = nn.Sequential(
+            nn.Linear(10, 10),
+            nn.ReLU(),
+            nn.Linear(10, 10))
 
     def forward(self, x):
-        x1 = self.relu(self.net1(x))  # [20, 10]
-        # x1_list = [torch.empty_like(x1, device='cuda') for _ in range(dist.get_world_size())]
-        # dist.all_gather(x1_list, x1)
-        x1_list = comm.all_gather(x1)
-        y = torch.cat(x1_list, dim=0).mean(0, keepdim=True).expand(5, -1)  # [5, 10]
-        weight = 0.9 * self.net2.weight + 0.1 * y
-        out = x1.mm(weight.t())
+        x1 = F.relu(self.stem(x))  # [20, 10]
+        branch1 = self.branch1(x1[:10])
+        branch2 = self.branch2(x1[10:])
+        branch1_list = [torch.empty_like(branch1, device='cuda') for _ in range(dist.get_world_size())]
+        dist.all_gather(branch1_list, branch1)
+        # branch1_list = comm.all_gather(branch1)
+        pred_weight = torch.cat(branch1_list, dim=0).mean(0, keepdim=True).expand(5, -1)  # [5, 10]
+        out = branch2.mm(pred_weight.t())
         return out
 
 
@@ -44,12 +52,13 @@ def demo_basic(rank, world_size):
     loss_fn = nn.MSELoss()
     optimizer = optim.SGD(ddp_model.parameters(), lr=0.001)
 
-    optimizer.zero_grad()
-    inputs = torch.randn((20, 10), device='cuda')
-    outputs = ddp_model(inputs)
-    labels = torch.randn(20, 5).to('cuda')
-    loss_fn(outputs, labels).backward()
-    optimizer.step()
+    for _ in range(5):
+        optimizer.zero_grad()
+        inputs = torch.randn((20, 10), device='cuda')
+        outputs = ddp_model(inputs)
+        labels = torch.randn_like(outputs).to('cuda')
+        loss_fn(outputs, labels).backward()
+        optimizer.step()
 
     cleanup()
 
